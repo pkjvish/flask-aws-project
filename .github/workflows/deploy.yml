@@ -1,9 +1,7 @@
 name: Deploy Flask App to ECS
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch: # disabled auto-trigger, run manually only if needed
 
 env:
   AWS_REGION: ap-south-1
