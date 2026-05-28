@@ -32,7 +32,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       # ── 3. Deploy infrastructure (VPC, ECR, ECS Cluster, ALB) ─────────
-      #       ECS Service is skipped at this stage (DeployService=false)
+      #       Uses placeholder image, ECS Service skipped (DeployService=false)
       - name: Deploy base infrastructure
         run: |
           aws cloudformation deploy \
@@ -75,12 +75,13 @@ jobs:
       # ── 8. Deploy ECS Service now that image exists in ECR ────────────
       - name: Deploy ECS Service
         run: |
+          ECR_IMAGE=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:latest
           aws cloudformation deploy \
             --template-file .aws/cloudformation.yaml \
             --stack-name ${{ env.STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
             --capabilities CAPABILITY_IAM \
-            --parameter-overrides DeployService=true \
+            --parameter-overrides DeployService=true AppImage=$ECR_IMAGE \
             --no-fail-on-empty-changeset
 
       # ── 9. Wait for ECS Service to be stable (tasks running) ──────────
