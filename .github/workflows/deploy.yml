@@ -31,16 +31,32 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ── 3. Check if stack already exists and is stable ────────────────
+      # ── 3. Check stack status and wait if in progress ────────────────
       - name: Check stack status
         id: stack-check
         run: |
-          STATUS=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.STACK_NAME }} \
-            --region ${{ env.AWS_REGION }} \
-            --query "Stacks[0].StackStatus" \
-            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-          echo "Stack status: $STATUS"
+          echo "Checking stack status..."
+
+          # Wait if stack is in any IN_PROGRESS state
+          while true; do
+            STATUS=$(aws cloudformation describe-stacks \
+              --stack-name ${{ env.STACK_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --query "Stacks[0].StackStatus" \
+              --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+            echo "Current stack status: $STATUS"
+
+            case $STATUS in
+              *_IN_PROGRESS)
+                echo "Stack is busy ($STATUS), waiting 15 seconds..."
+                sleep 15
+                ;;
+              *)
+                break
+                ;;
+            esac
+          done
+
           echo "status=$STATUS" >> $GITHUB_OUTPUT
 
           if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" || "$STATUS" == "UPDATE_ROLLBACK_COMPLETE" ]]; then
