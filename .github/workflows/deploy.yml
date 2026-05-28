@@ -31,9 +31,28 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ── 3. Deploy infrastructure (VPC, ECR, ECS Cluster, ALB) ─────────
+      # ── 3. Check if stack already exists and is stable ────────────────
+      - name: Check stack status
+        id: stack-check
+        run: |
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          echo "Stack status: $STATUS"
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+
+          if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" || "$STATUS" == "UPDATE_ROLLBACK_COMPLETE" ]]; then
+            echo "iac_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "iac_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ── 4. Deploy base infrastructure (only if stack does not exist) ──
       #       Uses placeholder image, ECS Service skipped (DeployService=false)
       - name: Deploy base infrastructure
+        if: steps.stack-check.outputs.iac_exists == 'false'
         run: |
           aws cloudformation deploy \
             --template-file .aws/cloudformation.yaml \
@@ -43,8 +62,9 @@ jobs:
             --parameter-overrides DeployService=false \
             --no-fail-on-empty-changeset
 
-      # ── 4. Wait for CloudFormation stack to be stable ─────────────────
-      - name: Wait for stack to stabilize
+      # ── 5. Wait for base stack to stabilize (only on fresh deploy) ────
+      - name: Wait for base stack to stabilize
+        if: steps.stack-check.outputs.iac_exists == 'false'
         run: |
           aws cloudformation wait stack-create-complete \
             --stack-name ${{ env.STACK_NAME }} \
@@ -53,17 +73,17 @@ jobs:
             --stack-name ${{ env.STACK_NAME }} \
             --region ${{ env.AWS_REGION }}
 
-      # ── 5. Authenticate Docker to ECR ─────────────────────────────────
+      # ── 6. Authenticate Docker to ECR ─────────────────────────────────
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ── 6. Build Docker image ─────────────────────────────────────────
+      # ── 7. Build Docker image ─────────────────────────────────────────
       - name: Build Docker image
         run: |
           docker build -t ${{ env.ECR_REPO }}:latest .
 
-      # ── 7. Tag and push image to ECR ──────────────────────────────────
+      # ── 8. Push image to ECR (overrides :latest on every run) ─────────
       - name: Push image to ECR
         run: |
           ECR_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}
@@ -71,20 +91,30 @@ jobs:
           docker tag ${{ env.ECR_REPO }}:latest $ECR_URI:${{ github.sha }}
           docker push $ECR_URI:latest
           docker push $ECR_URI:${{ github.sha }}
+          echo "ECR_IMAGE=$ECR_URI:latest" >> $GITHUB_ENV
 
-      # ── 8. Deploy ECS Service now that image exists in ECR ────────────
+      # ── 9. Deploy or update ECS Service via CloudFormation ────────────
       - name: Deploy ECS Service
         run: |
-          ECR_IMAGE=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:latest
           aws cloudformation deploy \
             --template-file .aws/cloudformation.yaml \
             --stack-name ${{ env.STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
             --capabilities CAPABILITY_IAM \
-            --parameter-overrides DeployService=true AppImage=$ECR_IMAGE \
+            --parameter-overrides DeployService=true AppImage=${{ env.ECR_IMAGE }} \
             --no-fail-on-empty-changeset
 
-      # ── 9. Wait for ECS Service to be stable (tasks running) ──────────
+      # ── 10. Force new ECS deployment to pull latest image ─────────────
+      #        This ensures ECS replaces running tasks even if CF had no changes
+      - name: Force new ECS deployment
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --service ${{ env.SERVICE_NAME }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      # ── 11. Wait for ECS tasks to be stable ───────────────────────────
       - name: Wait for ECS Service to stabilize
         run: |
           aws ecs wait services-stable \
@@ -92,7 +122,7 @@ jobs:
             --services ${{ env.SERVICE_NAME }} \
             --region ${{ env.AWS_REGION }}
 
-      # ── 10. Print application URL ─────────────────────────────────────
+      # ── 12. Print application URL ─────────────────────────────────────
       - name: Print application URL
         run: |
           URL=$(aws cloudformation describe-stacks \
@@ -102,7 +132,7 @@ jobs:
             --output text)
           echo "Application is live at: $URL"
 
-      # ── 11. Fetch ECS task logs for debugging ─────────────────────────
+      # ── 13. Fetch ECS container logs (always runs) ────────────────────
       - name: Fetch ECS container logs
         if: always()
         run: |
