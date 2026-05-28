@@ -100,3 +100,26 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='ExternalUrl'].OutputValue" \
             --output text)
           echo "Application is live at: $URL"
+
+      # ── 11. Fetch ECS task logs for debugging ─────────────────────────
+      - name: Fetch ECS container logs
+        if: always()
+        run: |
+          TASK_ARN=$(aws ecs list-tasks \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --service-name ${{ env.SERVICE_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskArns[0]' --output text)
+          echo "Task ARN: $TASK_ARN"
+
+          TASK_ID=$(echo $TASK_ARN | awk -F'/' '{print $NF}')
+          LOG_STREAM="secureapp/flask-container/${TASK_ID}"
+          echo "Fetching logs from stream: $LOG_STREAM"
+
+          aws logs get-log-events \
+            --log-group-name /ecs/secure-container-app \
+            --log-stream-name $LOG_STREAM \
+            --region ${{ env.AWS_REGION }} \
+            --limit 100 \
+            --query 'events[*].message' \
+            --output text || echo "No logs found yet"
