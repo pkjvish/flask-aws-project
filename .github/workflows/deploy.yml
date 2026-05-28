@@ -1,0 +1,102 @@
+name: Deploy Flask App to ECS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: ap-south-1
+  AWS_ACCOUNT_ID: '135306227278'
+  ECR_REPO: dynamic-secure-app
+  STACK_NAME: flask-secure-stack
+  CLUSTER_NAME: DynamicSecureCluster
+  SERVICE_NAME: flask-service
+
+jobs:
+  deploy:
+    name: Full Sequential Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout code ──────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # ── 2. Configure AWS credentials ──────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── 3. Deploy infrastructure (VPC, ECR, ECS Cluster, ALB) ─────────
+      #       ECS Service is skipped at this stage (DeployService=false)
+      - name: Deploy base infrastructure
+        run: |
+          aws cloudformation deploy \
+            --template-file .aws/cloudformation.yaml \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --capabilities CAPABILITY_IAM \
+            --parameter-overrides DeployService=false \
+            --no-fail-on-empty-changeset
+
+      # ── 4. Wait for CloudFormation stack to be stable ─────────────────
+      - name: Wait for stack to stabilize
+        run: |
+          aws cloudformation wait stack-create-complete \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} || \
+          aws cloudformation wait stack-update-complete \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }}
+
+      # ── 5. Authenticate Docker to ECR ─────────────────────────────────
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── 6. Build Docker image ─────────────────────────────────────────
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.ECR_REPO }}:latest .
+
+      # ── 7. Tag and push image to ECR ──────────────────────────────────
+      - name: Push image to ECR
+        run: |
+          ECR_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}
+          docker tag ${{ env.ECR_REPO }}:latest $ECR_URI:latest
+          docker tag ${{ env.ECR_REPO }}:latest $ECR_URI:${{ github.sha }}
+          docker push $ECR_URI:latest
+          docker push $ECR_URI:${{ github.sha }}
+
+      # ── 8. Deploy ECS Service now that image exists in ECR ────────────
+      - name: Deploy ECS Service
+        run: |
+          aws cloudformation deploy \
+            --template-file .aws/cloudformation.yaml \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --capabilities CAPABILITY_IAM \
+            --parameter-overrides DeployService=true \
+            --no-fail-on-empty-changeset
+
+      # ── 9. Wait for ECS Service to be stable (tasks running) ──────────
+      - name: Wait for ECS Service to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --services ${{ env.SERVICE_NAME }} \
+            --region ${{ env.AWS_REGION }}
+
+      # ── 10. Print application URL ─────────────────────────────────────
+      - name: Print application URL
+        run: |
+          URL=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ExternalUrl'].OutputValue" \
+            --output text)
+          echo "Application is live at: $URL"
