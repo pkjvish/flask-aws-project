@@ -122,6 +122,22 @@ phases:
           --no-fail-on-empty-changeset
 
       # ── Force new ECS deployment to pull latest image ─────────────────
+      - echo "[post_build] Waiting for ECS service to become ACTIVE..."
+      - |
+        while true; do
+          SVC_STATUS=$(aws ecs describe-services \
+            --cluster $CLUSTER_NAME \
+            --services $SERVICE_NAME \
+            --region $AWS_REGION \
+            --query "services[0].status" \
+            --output text 2>/dev/null || echo "UNKNOWN")
+          echo "ECS Service status: $SVC_STATUS"
+          if [ "$SVC_STATUS" = "ACTIVE" ]; then
+            break
+          fi
+          echo "Waiting 10 seconds..."
+          sleep 10
+        done
       - echo "[post_build] Forcing new ECS deployment..."
       - |
         aws ecs update-service \
