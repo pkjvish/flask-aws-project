@@ -1,13 +1,18 @@
+import os
+import logging
 from flask import Flask, request, jsonify, render_template_string
 from flask_mysqldb import MySQL
 
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(message)s')
+log = logging.getLogger(__name__)
+
 app = Flask(__name__)
 
-# 1. Configure MySQL Database Connection Parameters
-app.config['MYSQL_HOST'] = 'localhost'
-app.config['MYSQL_USER'] = 'root'
-app.config['MYSQL_PASSWORD'] = 'password'
-app.config['MYSQL_DB'] = 'crud_db'
+# Configure MySQL from environment variables
+app.config['MYSQL_HOST']     = os.environ.get('DB_HOST', '127.0.0.1')
+app.config['MYSQL_USER']     = os.environ.get('DB_USER', 'flask_user')
+app.config['MYSQL_PASSWORD'] = os.environ.get('DB_PASSWORD', '')
+app.config['MYSQL_DB']       = os.environ.get('DB_NAME', 'production_db')
 
 mysql = MySQL(app)
 
@@ -206,6 +211,12 @@ DASHBOARD_HTML = """
 </body>
 </html>
 """
+
+# ROUTE: ALB health check — never touches DB
+@app.route('/health')
+def health():
+    log.debug("Health check hit")
+    return jsonify(status='ok'), 200
 
 # 3. ROUTE: HOME GATEWAY SERVING GRAPHICAL GUI
 @app.route('/', methods=['GET'])
