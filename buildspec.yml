@@ -16,13 +16,14 @@ phases:
       # ── Authenticate Docker to ECR ────────────────────────────────────
       - echo "[pre_build] Logging in to Amazon ECR..."
       - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
-      - ECR_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO
-      - COMMIT_SHA=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-7)
+      - export ECR_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO
+      - export COMMIT_SHA=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-7)
       - echo "[pre_build] ECR URI = $ECR_URI"
       - echo "[pre_build] Commit SHA = $COMMIT_SHA"
 
       # ── Check and wait for stack to be stable ────────────────────────
       - |
+        #!/bin/bash
         echo "[pre_build] Checking CloudFormation stack status..."
         while true; do
           STATUS=$(aws cloudformation describe-stacks \
@@ -33,7 +34,7 @@ phases:
           echo "Stack status: $STATUS"
           case $STATUS in
             DOES_NOT_EXIST)
-              echo "Stack does not exist yet. Will create fresh."
+              echo "Stack does not exist. Will create fresh."
               break
               ;;
             *_IN_PROGRESS)
@@ -41,23 +42,34 @@ phases:
               sleep 15
               ;;
             *)
+              echo "Stack is stable at: $STATUS"
               break
               ;;
           esac
         done
-        echo "STACK_STATUS=$STATUS" >> /tmp/stack_env
-        if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" || "$STATUS" == "UPDATE_ROLLBACK_COMPLETE" ]]; then
-          echo "IAC_EXISTS=true" >> /tmp/stack_env
+
+        if [ "$STATUS" = "CREATE_COMPLETE" ] || [ "$STATUS" = "UPDATE_COMPLETE" ] || [ "$STATUS" = "UPDATE_ROLLBACK_COMPLETE" ]; then
+          export IAC_EXISTS=true
         else
-          echo "IAC_EXISTS=false" >> /tmp/stack_env
+          export IAC_EXISTS=false
         fi
-        cat /tmp/stack_env
+
+        echo "export ECR_URI=$ECR_URI"         >> /tmp/build_env
+        echo "export COMMIT_SHA=$COMMIT_SHA"   >> /tmp/build_env
+        echo "export IAC_EXISTS=$IAC_EXISTS"   >> /tmp/build_env
+        echo "export STACK_STATUS=$STATUS"     >> /tmp/build_env
+        echo "[pre_build] Done. IAC_EXISTS=$IAC_EXISTS"
+        cat /tmp/build_env
 
   build:
     commands:
+      # ── Load env from pre_build ───────────────────────────────────────
+      - . /tmp/build_env
+
       # ── Deploy base infrastructure only if stack does not exist ───────
-      - source /tmp/stack_env
       - |
+        #!/bin/bash
+        . /tmp/build_env
         if [ "$IAC_EXISTS" = "false" ]; then
           echo "[build] Stack not found. Deploying base infrastructure..."
           aws cloudformation deploy \
@@ -73,8 +85,10 @@ phases:
             --stack-name $STACK_NAME --region $AWS_REGION || \
           aws cloudformation wait stack-update-complete \
             --stack-name $STACK_NAME --region $AWS_REGION
+
+          echo "[build] Base infrastructure ready."
         else
-          echo "[build] Stack already exists ($STACK_STATUS). Skipping base infrastructure deploy."
+          echo "[build] Stack already exists ($STACK_STATUS). Skipping IaC deploy."
         fi
 
       # ── Build Docker image ────────────────────────────────────────────
@@ -82,6 +96,7 @@ phases:
       - docker build -t $ECR_REPO:latest .
 
       # ── Tag and push to ECR ───────────────────────────────────────────
+      - . /tmp/build_env
       - echo "[build] Pushing image to ECR..."
       - docker tag $ECR_REPO:latest $ECR_URI:latest
       - docker tag $ECR_REPO:latest $ECR_URI:$COMMIT_SHA
@@ -91,9 +106,13 @@ phases:
 
   post_build:
     commands:
+      # ── Load env from pre_build ───────────────────────────────────────
+      - . /tmp/build_env
+
       # ── Deploy ECS Service via CloudFormation ─────────────────────────
       - echo "[post_build] Deploying ECS Service..."
       - |
+        . /tmp/build_env
         aws cloudformation deploy \
           --template-file .aws/cloudformation.yaml \
           --stack-name $STACK_NAME \
@@ -120,7 +139,6 @@ phases:
           --region $AWS_REGION
 
       # ── Print application URL ─────────────────────────────────────────
-      - echo "[post_build] Fetching application URL..."
       - |
         URL=$(aws cloudformation describe-stacks \
           --stack-name $STACK_NAME \
