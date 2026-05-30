@@ -2,7 +2,7 @@ version: 0.2
 
 env:
   variables:
-    AWS_REGION: ap-south-1
+    AWS_REGION: ap-south-1 
     AWS_ACCOUNT_ID: '135306227278'
     ECR_REPO: dynamic-secure-app
     STACK_NAME: flask-secure-stack
