@@ -1,0 +1,45 @@
+name: Mirror to AWS CodeCommit
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  mirror:
+    name: Push to CodeCommit
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout full git history ──────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      # ── 2. Configure AWS credentials ──────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      # ── 3. Generate CodeCommit HTTPS credentials via AWS CLI ──────────
+      - name: Generate CodeCommit credential
+        id: codecommit-creds
+        run: |
+          CREDS=$(aws codecommit get-repository \
+            --repository-name flask-aws-project \
+            --region ap-south-1 \
+            --query "repositoryMetadata.cloneUrlHttp" \
+            --output text)
+          echo "CODECOMMIT_URL=$CREDS" >> $GITHUB_ENV
+
+      # ── 4. Push to CodeCommit ─────────────────────────────────────────
+      - name: Mirror to CodeCommit
+        run: |
+          git config --global credential.helper '!aws codecommit credential-helper $@'
+          git config --global credential.UseHttpPath true
+          git remote add codecommit $CODECOMMIT_URL
+          git push codecommit main --force
