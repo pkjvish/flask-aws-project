@@ -13,5 +13,13 @@ mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB
 mysql -e "GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';"
 mysql -e "FLUSH PRIVILEGES;"
 
+if [ -f /app/init.sql ]; then
+  echo "[entrypoint] Running init.sql..."
+  mysql -u ${DB_USER} -p${DB_PASSWORD} ${DB_NAME} < /app/init.sql
+  echo "[entrypoint] init.sql executed successfully."
+else
+  echo "[entrypoint] No init.sql found, skipping."
+fi
+
 echo "[entrypoint] DB setup complete. Starting supervisord..."
 exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
