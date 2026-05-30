@@ -310,4 +310,4 @@ def delete_user_via_url():
 if __name__ == '__main__':
     port = int(os.environ.get('APP_PORT', 5000))
     log.info(f"Starting Flask on 0.0.0.0:{port}")
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port) 
