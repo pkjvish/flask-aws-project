@@ -96,7 +96,7 @@ Create a `.env` file in the project root:
 
 ```env
 DB_HOST=127.0.0.1
-DB_USER=flask_user
+DB_USER=root
 DB_PASSWORD=VaultSecurePassword2026!
 DB_NAME=production_db
 APP_PORT=5000
@@ -110,8 +110,8 @@ mysql -u root -p
 
 ```sql
 CREATE DATABASE IF NOT EXISTS production_db;
-CREATE USER IF NOT EXISTS 'flask_user'@'localhost' IDENTIFIED BY 'VaultSecurePassword2026!';
-GRANT ALL PRIVILEGES ON production_db.* TO 'flask_user'@'localhost';
+CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY 'VaultSecurePassword2026!';
+GRANT ALL PRIVILEGES ON production_db.* TO 'root'@'localhost';
 FLUSH PRIVILEGES;
 EXIT;
 ```
@@ -141,7 +141,7 @@ docker build -t dynamic-secure-app .
 ```bash
 docker run -p 5000:5000 \
   -e DB_HOST=127.0.0.1 \
-  -e DB_USER=flask_user \
+  -e DB_USER=root \
   -e DB_PASSWORD=VaultSecurePassword2026! \
   -e DB_NAME=production_db \
   -e APP_PORT=5000 \
@@ -373,7 +373,7 @@ Or go to **AWS Console → CloudWatch → Log groups → /ecs/secure-container-a
 | `AWSRegion` | `ap-south-1` | Deployment region |
 | `DeployService` | `false` | Set to `true` after ECR image is pushed |
 | `AppImage` | `public.ecr.aws/docker/library/python:3.11-slim` | Container image URI |
-| `SecureDBUser` | `flask_user` | MySQL username |
+| `SecureDBUser` | `root` | MySQL username |
 | `SecureDBPassword` | `VaultSecurePassword2026!` | MySQL password |
 | `SecureDBName` | `production_db` | MySQL database name |
 

@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 # Configure MySQL from environment variables
 app.config['MYSQL_HOST']     = os.environ.get('DB_HOST', '127.0.0.1')
-app.config['MYSQL_USER']     = os.environ.get('DB_USER', 'flask_user')
+app.config['MYSQL_USER']     = os.environ.get('DB_USER', 'root')
 app.config['MYSQL_PASSWORD'] = os.environ.get('DB_PASSWORD', '')
 app.config['MYSQL_DB']       = os.environ.get('DB_NAME', 'production_db')
 
