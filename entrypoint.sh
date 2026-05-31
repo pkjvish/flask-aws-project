@@ -15,7 +15,8 @@ mysql -e "FLUSH PRIVILEGES;"
 
 if [ -f /app/init.sql ]; then
   echo "[entrypoint] Running init.sql..."
-  mysql -u ${DB_USER} -p${DB_PASSWORD} ${DB_NAME} < /app/init.sql
+  # CORRECTED: Run initialization script as root to avoid 1044 Access Denied errors
+  mysql ${DB_NAME} < /app/init.sql
   echo "[entrypoint] init.sql executed successfully."
 else
   echo "[entrypoint] No init.sql found, skipping."
