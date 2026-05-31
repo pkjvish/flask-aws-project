@@ -48,65 +48,53 @@ phases:
           esac
         done
 
-        if [ "$STATUS" = "CREATE_COMPLETE" ] || [ "$STATUS" = "UPDATE_COMPLETE" ] || [ "$STATUS" = "UPDATE_ROLLBACK_COMPLETE" ]; then
-          IAC_EXISTS=true
-        else
-          IAC_EXISTS=false
-        fi
-
-        # ── Check ECS service status ──────────────────────────────────
+        # ── Force stop existing ECS tasks to unblock CloudFormation ──────
         SVC_STATUS=$(aws ecs describe-services \
           --cluster $CLUSTER_NAME \
           --services $SERVICE_NAME \
           --region $AWS_REGION \
           --query "services[0].status" \
           --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-        echo "ECS Service status: $SVC_STATUS"
-
+        
         if [ "$SVC_STATUS" = "ACTIVE" ]; then
-          ECS_EXISTS=true
-        else
-          ECS_EXISTS=false
+          echo "[pre_build] Force stopping running tasks to prevent CloudFormation blocking..."
+          TASK_ARNS=$(aws ecs list-tasks --cluster $CLUSTER_NAME --service-name $SERVICE_NAME --region $AWS_REGION --query 'taskArns' --output text)
+          if [ -n "$TASK_ARNS" ]; then
+            for TASK_ARN in $TASK_ARNS; do
+              aws ecs stop-task --cluster $CLUSTER_NAME --task $TASK_ARN --reason "CodeBuild stopping task to unblock CFN update" --region $AWS_REGION
+            done
+            echo "[pre_build] Tasks stopped. Waiting 10 seconds for state to clear..."
+            sleep 10
+          fi
         fi
 
         echo "export ECR_URI=$ECR_URI"           >> /tmp/build_env
         echo "export COMMIT_SHA=$COMMIT_SHA"     >> /tmp/build_env
-        echo "export IAC_EXISTS=$IAC_EXISTS"     >> /tmp/build_env
         echo "export STACK_STATUS=$STATUS"       >> /tmp/build_env
-        echo "export ECS_EXISTS=$ECS_EXISTS"     >> /tmp/build_env
-        echo "export SVC_STATUS=$SVC_STATUS"     >> /tmp/build_env
-        echo "[pre_build] Done. IAC_EXISTS=$IAC_EXISTS | ECS_EXISTS=$ECS_EXISTS"
-        cat /tmp/build_env
+        echo "[pre_build] Done."
 
   build:
     commands:
-      # ── Load env ─────────────────────────────────────────────────────
       - . /tmp/build_env
 
-      # ── Deploy base infrastructure only if stack does not exist ───────
+      # ── ALWAYS deploy CloudFormation to ensure IaC is in sync ─────────
       - |
         #!/bin/bash
         . /tmp/build_env
-        if [ "$IAC_EXISTS" = "false" ]; then
-          echo "[build] Stack not found. Deploying base infrastructure..."
-          aws cloudformation deploy \
-            --template-file .aws/cloudformation.yaml \
-            --stack-name $STACK_NAME \
-            --region $AWS_REGION \
-            --capabilities CAPABILITY_IAM \
-            --parameter-overrides DeployService=false SecureDBName=crud_db \
-            --no-fail-on-empty-changeset
+        echo "[build] Deploying/Updating infrastructure via CloudFormation..."
+        aws cloudformation deploy \
+          --template-file .aws/cloudformation.yaml \
+          --stack-name $STACK_NAME \
+          --region $AWS_REGION \
+          --capabilities CAPABILITY_IAM \
+          --parameter-overrides DeployService=true AppImage=$ECR_URI:latest SecureDBName=crud_db \
+          --no-fail-on-empty-changeset
 
-          echo "[build] Waiting for base stack to stabilize..."
-          aws cloudformation wait stack-create-complete \
-            --stack-name $STACK_NAME --region $AWS_REGION || \
-          aws cloudformation wait stack-update-complete \
-            --stack-name $STACK_NAME --region $AWS_REGION
-
-          echo "[build] Base infrastructure ready."
-        else
-          echo "[build] Stack already exists ($STACK_STATUS). Skipping IaC deploy."
-        fi
+        echo "[build] Waiting for stack to stabilize..."
+        aws cloudformation wait stack-create-complete \
+          --stack-name $STACK_NAME --region $AWS_REGION 2>/dev/null || \
+        aws cloudformation wait stack-update-complete \
+          --stack-name $STACK_NAME --region $AWS_REGION
 
       # ── Build Docker image ────────────────────────────────────────────
       - echo "[build] Building Docker image..."
@@ -119,62 +107,21 @@ phases:
       - docker tag $ECR_REPO:latest $ECR_URI:$COMMIT_SHA
       - docker push $ECR_URI:latest
       - docker push $ECR_URI:$COMMIT_SHA
-      - echo "[build] Image pushed to ECR successfully."
 
   post_build:
     commands:
-      # ── Load env ─────────────────────────────────────────────────────
       - . /tmp/build_env
 
-      # ── Create or update ECS Service ──────────────────────────────────
+      # ── Force ECS to pull the new image ───────────────────────────────
       - |
         #!/bin/bash
         . /tmp/build_env
-
-        if [ "$ECS_EXISTS" = "false" ]; then
-          echo "[post_build] ECS Service not found. Creating via CloudFormation (DeployService=true)..."
-          aws cloudformation deploy \
-            --template-file .aws/cloudformation.yaml \
-            --stack-name $STACK_NAME \
-            --region $AWS_REGION \
-            --capabilities CAPABILITY_IAM \
-            --parameter-overrides DeployService=true AppImage=$ECR_URI:latest SecureDBName=crud_db \
-            --no-fail-on-empty-changeset
-
-          echo "[post_build] Waiting for ECS service to become ACTIVE..."
-          while true; do
-            SVC_STATUS=$(aws ecs describe-services \
-              --cluster $CLUSTER_NAME \
-              --services $SERVICE_NAME \
-              --region $AWS_REGION \
-              --query "services[0].status" \
-              --output text 2>/dev/null || echo "UNKNOWN")
-            echo "ECS Service status: $SVC_STATUS"
-            if [ "$SVC_STATUS" = "ACTIVE" ]; then
-              echo "[post_build] ECS Service is now ACTIVE."
-              break
-            fi
-            echo "Waiting 10 seconds..."
-            sleep 10
-          done
-
-        else
-          echo "[post_build] ECS Service already ACTIVE. Updating task definition and forcing new deployment..."
-          aws cloudformation deploy \
-            --template-file .aws/cloudformation.yaml \
-            --stack-name $STACK_NAME \
-            --region $AWS_REGION \
-            --capabilities CAPABILITY_IAM \
-            --parameter-overrides DeployService=true AppImage=$ECR_URI:latest SecureDBName=crud_db \
-            --no-fail-on-empty-changeset
-
-          echo "[post_build] Forcing new ECS deployment to pull latest image..."
-          aws ecs update-service \
-            --cluster $CLUSTER_NAME \
-            --service $SERVICE_NAME \
-            --force-new-deployment \
-            --region $AWS_REGION
-        fi
+        echo "[post_build] Forcing new ECS deployment to pull latest image..."
+        aws ecs update-service \
+          --cluster $CLUSTER_NAME \
+          --service $SERVICE_NAME \
+          --force-new-deployment \
+          --region $AWS_REGION
 
       # ── Wait for ECS tasks to stabilize ──────────────────────────────
       - echo "[post_build] Waiting for ECS tasks to reach RUNNING state..."
