@@ -29,6 +29,46 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # ── NEW: Cancel any previous running workflow runs for this branch ─
+      - name: Cancel previous runs
+        uses: styfle/cancel-workflow-action@0.12.1
+        with:
+          access_token: ${{ github.token }}
+
+      # ── NEW: Ensure ECS service uses only one task at a time ──────────
+      #       (minimumHealthyPercent=0, maximumPercent=100)
+      - name: Configure ECS deployment (no overlapping tasks)
+        run: |
+          echo "Checking current deployment configuration for service ${{ env.SERVICE_NAME }}..."
+          CURRENT_MIN=$(aws ecs describe-services \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --services ${{ env.SERVICE_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "services[0].deploymentConfiguration.minimumHealthyPercent" \
+            --output text 2>/dev/null || echo "NOT_FOUND")
+          CURRENT_MAX=$(aws ecs describe-services \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --services ${{ env.SERVICE_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "services[0].deploymentConfiguration.maximumPercent" \
+            --output text 2>/dev/null || echo "NOT_FOUND")
+
+          if [[ "$CURRENT_MIN" != "0" ]] || [[ "$CURRENT_MAX" != "100" ]]; then
+            echo "Updating service deployment configuration to MinimumHealthyPercent=0, MaximumPercent=100 (zero overlap)..."
+            aws ecs update-service \
+              --cluster ${{ env.CLUSTER_NAME }} \
+              --service ${{ env.SERVICE_NAME }} \
+              --deployment-configuration minimumHealthyPercent=0,maximumPercent=100 \
+              --region ${{ env.AWS_REGION }}
+            echo "Waiting for service to stabilise after configuration change..."
+            aws ecs wait services-stable \
+              --cluster ${{ env.CLUSTER_NAME }} \
+              --services ${{ env.SERVICE_NAME }} \
+              --region ${{ env.AWS_REGION }}
+          else
+            echo "Deployment configuration already correct (min=0, max=100)."
+          fi
+
       # ── 3. Check stack status and wait if in progress ────────────────
       - name: Check stack status
         id: stack-check
@@ -128,13 +168,62 @@ jobs:
             --force-new-deployment \
             --region ${{ env.AWS_REGION }}
 
-      # ── 11. Wait for ECS tasks to be stable ───────────────────────────
-      - name: Wait for ECS Service to stabilize
+      # ── 11. Enhanced wait: ensure deployment completes or fail ────────
+      - name: Wait for ECS deployment to stabilise (with failure detection)
         run: |
-          aws ecs wait services-stable \
-            --cluster ${{ env.CLUSTER_NAME }} \
-            --services ${{ env.SERVICE_NAME }} \
-            --region ${{ env.AWS_REGION }}
+          TIMEOUT_SECONDS=300   # 5 minutes
+          INTERVAL_SECONDS=10
+          ELAPSED=0
+
+          echo "Waiting for ECS service ${{ env.SERVICE_NAME }} to become stable (timeout=${TIMEOUT_SECONDS}s)..."
+
+          while [ $ELAPSED -lt $TIMEOUT_SECONDS ]; do
+            DEPLOYMENTS=$(aws ecs describe-services \
+              --cluster ${{ env.CLUSTER_NAME }} \
+              --services ${{ env.SERVICE_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --query "services[0].deployments" \
+              --output json)
+
+            PRIMARY_DEPLOYMENT=$(echo $DEPLOYMENTS | jq '.[] | select(.status == "PRIMARY")')
+            ROLLOUT_STATE=$(echo $PRIMARY_DEPLOYMENT | jq -r '.rolloutState // "UNKNOWN"')
+            RUNNING_COUNT=$(echo $PRIMARY_DEPLOYMENT | jq -r '.runningCount // 0')
+            DESIRED_COUNT=$(echo $PRIMARY_DEPLOYMENT | jq -r '.desiredCount // 0')
+
+            echo "Rollout state: $ROLLOUT_STATE | Running: $RUNNING_COUNT / Desired: $DESIRED_COUNT"
+
+            if [[ "$ROLLOUT_STATE" == "FAILED" ]]; then
+              echo "❌ ECS deployment FAILED."
+              TASK_ARN=$(aws ecs list-tasks \
+                --cluster ${{ env.CLUSTER_NAME }} \
+                --service-name ${{ env.SERVICE_NAME }} \
+                --region ${{ env.AWS_REGION }} \
+                --query 'taskArns[0]' --output text)
+              if [ "$TASK_ARN" != "None" ] && [ "$TASK_ARN" != "" ]; then
+                FAILURE_REASON=$(aws ecs describe-tasks \
+                  --cluster ${{ env.CLUSTER_NAME }} \
+                  --tasks $TASK_ARN \
+                  --region ${{ env.AWS_REGION }} \
+                  --query 'tasks[0].containers[0].reason' --output text)
+                echo "Task failure reason: $FAILURE_REASON"
+              fi
+              exit 1
+            fi
+
+            if [[ "$ROLLOUT_STATE" == "COMPLETED" ]] && [ "$RUNNING_COUNT" -eq "$DESIRED_COUNT" ]; then
+              echo "✅ ECS service is stable and all tasks are running."
+              break
+            fi
+
+            sleep $INTERVAL_SECONDS
+            ELAPSED=$((ELAPSED + INTERVAL_SECONDS))
+          done
+
+          if [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then
+            echo "❌ Timeout waiting for ECS service to stabilise after ${TIMEOUT_SECONDS}s."
+            echo "Last known rollout state: $ROLLOUT_STATE | Running: $RUNNING_COUNT / Desired: $DESIRED_COUNT"
+            exit 1
+          fi
 
       # ── 12. Print application URL ─────────────────────────────────────
       - name: Print application URL
