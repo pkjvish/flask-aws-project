@@ -94,7 +94,7 @@ phases:
             --stack-name $STACK_NAME \
             --region $AWS_REGION \
             --capabilities CAPABILITY_IAM \
-            --parameter-overrides DeployService=false \
+            --parameter-overrides DeployService=false SecureDBName=crud_db \
             --no-fail-on-empty-changeset
 
           echo "[build] Waiting for base stack to stabilize..."
@@ -138,7 +138,7 @@ phases:
             --stack-name $STACK_NAME \
             --region $AWS_REGION \
             --capabilities CAPABILITY_IAM \
-            --parameter-overrides DeployService=true AppImage=$ECR_URI:latest \
+            --parameter-overrides DeployService=true AppImage=$ECR_URI:latest SecureDBName=crud_db \
             --no-fail-on-empty-changeset
 
           echo "[post_build] Waiting for ECS service to become ACTIVE..."
@@ -165,7 +165,7 @@ phases:
             --stack-name $STACK_NAME \
             --region $AWS_REGION \
             --capabilities CAPABILITY_IAM \
-            --parameter-overrides DeployService=true AppImage=$ECR_URI:latest \
+            --parameter-overrides DeployService=true AppImage=$ECR_URI:latest SecureDBName=crud_db \
             --no-fail-on-empty-changeset
 
           echo "[post_build] Forcing new ECS deployment to pull latest image..."

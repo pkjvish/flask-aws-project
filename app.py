@@ -39,9 +39,9 @@ DASHBOARD_HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Customer Registry Dashboard</title>
     <!-- Bootstrap 5 CSS CDN (Fixed Absolute Paths) -->
-    <link href="jsdelivr.net" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <!-- Bootstrap Icons CDN -->
-    <link href="jsdelivr.net" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
         body { background-color: #f4f6f9; font-family: 'Segoe UI', system-ui, sans-serif; }
         .customer-card { border: none; border-radius: 12px; transition: transform 0.2s, box-shadow 0.2s; background: white; }
@@ -207,7 +207,7 @@ DASHBOARD_HTML = """
     </script>
     
     <!-- Bootstrap Bundle JS CDN -->
-    <script src="jsdelivr.net"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
 """

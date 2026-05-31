@@ -1,8 +1,5 @@
 -- init.sql: runs once after DB and user are created
 
-CREATE DATABASE IF NOT EXISTS crud_db;
-USE crud_db;
-
 CREATE TABLE IF NOT EXISTS tbl_user (
     user_id INT AUTO_INCREMENT PRIMARY KEY,
     user_name VARCHAR(45) NOT NULL,

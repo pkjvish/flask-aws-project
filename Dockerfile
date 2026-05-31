@@ -1,5 +1,6 @@
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
+ENV APP_PORT=5000
 
 RUN apt-get update && apt-get install -y \
     mysql-server \
