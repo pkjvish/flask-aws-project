@@ -96,54 +96,95 @@ phases:
       - |
         if [ "$STACK_EXISTS" != "true" ]; then
           echo "[build] First-time deployment: creating base CloudFormation stack (service disabled)"
-          aws cloudformation deploy \
+          DEPLOY_OUTPUT=$(aws cloudformation deploy \
             --template-file .aws/cloudformation.yaml \
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
             --capabilities CAPABILITY_IAM \
-            --parameter-overrides DeployService=false AppImage="public.ecr.aws/docker/library/python:3.11-slim" SecureDBName="$DATABASE_NAME" \
-            --no-fail-on-empty-changeset
-          aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
-          echo "[build] Base stack created"
+            --parameter-overrides DeployService=false AppImage="public.ecr.aws/docker/library/python:3.11-slim" SecureDBName="$DATABASE_NAME" 2>&1)
+          DEPLOY_EXIT=$?
+          echo "$DEPLOY_OUTPUT"
+          if [ $DEPLOY_EXIT -ne 0 ]; then
+            echo "[build] ERROR: CloudFormation deploy failed with exit code $DEPLOY_EXIT"
+            exit 1
+          fi
+          echo "[build] CloudFormation deploy command succeeded; waiting for stack completion..."
+          if ! aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" --region "$AWS_REGION" 2>&1; then
+            echo "[build] ERROR: Stack creation did not complete successfully"
+            FINAL_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" --query "Stacks[0].StackStatus" --output text 2>&1)
+            echo "[build] Final stack status: $FINAL_STATUS"
+            exit 1
+          fi
+          echo "[build] Base stack created successfully"
         fi
-      - echo "[build] Building Docker image..."
-      - docker build -t "$ECR_REPO:latest" .
-      - docker tag "$ECR_REPO:latest" "$ECR_URI:latest"
-      - docker tag "$ECR_REPO:latest" "$ECR_URI:$COMMIT_SHA"
+      - |
+        echo "[build] Verifying CloudFormation stack exists..."
+        VERIFY_STACK=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" --query "Stacks[0].StackStatus" --output text 2>&1)
+        echo "[build] Stack status: $VERIFY_STACK"
+        if ! echo "$VERIFY_STACK" | grep -qE "CREATE_COMPLETE|UPDATE_COMPLETE"; then
+          echo "[build] ERROR: Stack exists but status is not ready: $VERIFY_STACK"
+          exit 1
+        fi
       - |
         echo "[build] Verifying ECR repository exists before push..."
         if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" >/dev/null 2>&1; then
-          echo "[build] ECR repository $ECR_REPO not found; creating it now"
-          aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION"
+          echo "[build] ERROR: ECR repository $ECR_REPO does not exist"
+          echo "[build] Stack creation may have failed silently; check CloudFormation events"
+          exit 1
         fi
+        echo "[build] ECR repository verified: $ECR_REPO"
+      - echo "[build] Building Docker image..."
+      - docker build -t "$ECR_REPO:latest" .
+      - docker tag "$ECR_REPO:latest" "$ECR_URI:latest"
+      - docker tag "$ECR_REPO:latest" "$ECR_REPO:$COMMIT_SHA"
       - echo "[build] Pushing Docker images to ECR..."
       - docker push "$ECR_URI:latest"
       - docker push "$ECR_URI:$COMMIT_SHA"
       - |
         if [ "$STACK_EXISTS" != "true" ]; then
-          echo "[build] Enabling ECS service by updating CloudFormation stack"
-          aws cloudformation deploy \
+          echo "[build] Enabling ECS service by updating CloudFormation stack with new image"
+          DEPLOY_OUTPUT=$(aws cloudformation deploy \
             --template-file .aws/cloudformation.yaml \
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
             --capabilities CAPABILITY_IAM \
-            --parameter-overrides DeployService=true AppImage="$ECR_URI:$COMMIT_SHA" SecureDBName="$DATABASE_NAME" \
-            --no-fail-on-empty-changeset
-          aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
-          echo "[build] Initial service deployment completed"
+            --parameter-overrides DeployService=true AppImage="$ECR_URI:$COMMIT_SHA" SecureDBName="$DATABASE_NAME" 2>&1)
+          DEPLOY_EXIT=$?
+          echo "$DEPLOY_OUTPUT"
+          if [ $DEPLOY_EXIT -ne 0 ]; then
+            echo "[build] ERROR: CloudFormation stack update failed with exit code $DEPLOY_EXIT"
+            exit 1
+          fi
+          echo "[build] CloudFormation update succeeded; waiting for stack update..."
+          if ! aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME" --region "$AWS_REGION" 2>&1; then
+            echo "[build] ERROR: Stack update did not complete successfully"
+            FINAL_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" --query "Stacks[0].StackStatus" --output text 2>&1)
+            echo "[build] Final stack status: $FINAL_STATUS"
+            exit 1
+          fi
+          echo "[build] ECS service deployment completed"
         else
           if [ -z "${PREVIOUS_TASK_DEF_ARN:-}" ]; then
-            echo "[build] Existing stack without service task definition. Performing a CloudFormation service update."
-            aws cloudformation deploy \
+            echo "[build] Existing stack without prior task definition. Performing CloudFormation service update."
+            DEPLOY_OUTPUT=$(aws cloudformation deploy \
               --template-file .aws/cloudformation.yaml \
               --stack-name "$STACK_NAME" \
               --region "$AWS_REGION" \
               --capabilities CAPABILITY_IAM \
-              --parameter-overrides DeployService=true AppImage="$ECR_URI:$COMMIT_SHA" SecureDBName="$DATABASE_NAME" \
-              --no-fail-on-empty-changeset
-            aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
+              --parameter-overrides DeployService=true AppImage="$ECR_URI:$COMMIT_SHA" SecureDBName="$DATABASE_NAME" 2>&1)
+            DEPLOY_EXIT=$?
+            echo "$DEPLOY_OUTPUT"
+            if [ $DEPLOY_EXIT -ne 0 ]; then
+              echo "[build] ERROR: CloudFormation update failed with exit code $DEPLOY_EXIT"
+              exit 1
+            fi
+            if ! aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME" --region "$AWS_REGION" 2>&1; then
+              echo "[build] ERROR: Stack update did not complete"
+              exit 1
+            fi
           else
             export NEW_IMAGE="$ECR_URI:$COMMIT_SHA"
+            echo "[build] Updating existing ECS service with new task definition (image: $NEW_IMAGE)"
             aws ecs describe-task-definition \
               --task-definition "$PREVIOUS_TASK_DEF_ARN" \
               --region "$AWS_REGION" \
@@ -166,14 +207,18 @@ phases:
               --region "$AWS_REGION" \
               --query "taskDefinition.taskDefinitionArn" --output text)
             echo "NEW_TASK_DEF_ARN=$NEW_TASK_DEF_ARN" >> /tmp/build_env
-            echo "[build] Updating ECS service to use new task definition $NEW_TASK_DEF_ARN"
+            echo "[build] Registered new task definition: $NEW_TASK_DEF_ARN"
+            echo "[build] Updating ECS service to use new task definition"
             aws ecs update-service \
               --cluster "$CLUSTER_NAME" \
               --service "$SERVICE_NAME" \
               --task-definition "$NEW_TASK_DEF_ARN" \
               --deployment-configuration minimumHealthyPercent=0,maximumPercent=100 \
               --force-new-deployment \
-              --region "$AWS_REGION"
+              --region "$AWS_REGION" || {
+              echo "[build] ERROR: Failed to update ECS service"
+              exit 1
+            }
           fi
         fi
 
@@ -186,6 +231,7 @@ phases:
         INTERVAL_SECONDS=10
         ELAPSED=0
         FAILED=0
+        SUCCESS=0
         while [ $ELAPSED -lt $TIMEOUT_SECONDS ]; do
           STATUS_JSON=$(aws ecs describe-services \
             --cluster "$CLUSTER_NAME" \
@@ -194,26 +240,29 @@ phases:
             --query "services[0]" \
             --output json 2>/dev/null || echo '{}')
           if [ -z "$STATUS_JSON" ] || [ "$STATUS_JSON" = "null" ] || [ "$STATUS_JSON" = "{}" ]; then
-            echo "[post_build] ECS service not found or cluster unavailable"
-            FAILED=1
-            break
+            echo "[post_build] ECS service not found; cluster may not be ready yet"
+            sleep $INTERVAL_SECONDS
+            ELAPSED=$((ELAPSED + INTERVAL_SECONDS))
+            continue
           fi
           ROLLOUT_STATE=$(echo "$STATUS_JSON" | python3 -c "import sys, json; d=json.load(sys.stdin); print((d.get('deployments') or [{}])[-1].get('rolloutState','UNKNOWN'))")
           RUNNING_COUNT=$(echo "$STATUS_JSON" | python3 -c "import sys, json; d=json.load(sys.stdin); print((d.get('deployments') or [{}])[-1].get('runningCount',0))")
           DESIRED_COUNT=$(echo "$STATUS_JSON" | python3 -c "import sys, json; d=json.load(sys.stdin); print((d.get('deployments') or [{}])[-1].get('desiredCount',0))")
           echo "[post_build] Rollout=$ROLLOUT_STATE Running=$RUNNING_COUNT Desired=$DESIRED_COUNT"
           if [ "$ROLLOUT_STATE" = "FAILED" ]; then
+            echo "[post_build] Deployment failed (rollout state = FAILED)"
             FAILED=1
             break
           fi
-          if [ "$ROLLOUT_STATE" = "COMPLETED" ] && [ "$RUNNING_COUNT" -eq "$DESIRED_COUNT" ]; then
-            FAILED=0
+          if [ "$ROLLOUT_STATE" = "COMPLETED" ] && [ "$DESIRED_COUNT" -gt 0 ] && [ "$RUNNING_COUNT" -eq "$DESIRED_COUNT" ]; then
+            echo "[post_build] Deployment completed successfully"
+            SUCCESS=1
             break
           fi
           sleep $INTERVAL_SECONDS
           ELAPSED=$((ELAPSED + INTERVAL_SECONDS))
         done
-        if [ $FAILED -eq 1 ] || [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then
+        if [ $SUCCESS -ne 1 ]; then
           echo "[post_build] Deployment failed or timed out. Starting rollback..."
           if [ "${STACK_EXISTS:-false}" != "true" ]; then
             echo "[post_build] Removing newly-created CloudFormation stack..."
@@ -253,5 +302,8 @@ phases:
         echo "[post_build] Task ARN: $TASK_ARN"
         if [ "$TASK_ARN" != "None" ] && [ -n "$TASK_ARN" ]; then
           TASK_ID=$(echo "$TASK_ARN" | awk -F'/' '{print $NF}')
-          aws logs get-log-events --log-group-name /ecs/secure-container-app --log-stream-name secureapp/flask-container/$TASK_ID --region "$AWS_REGION" --limit 50 --query 'events[*].message' --output text || echo "No logs found yet"
+          LOG_GROUP="/ecs/${STACK_NAME}-container-app"
+          LOG_STREAM="secureapp/flask-container/$TASK_ID"
+          echo "[post_build] Fetching logs from $LOG_GROUP / $LOG_STREAM"
+          aws logs get-log-events --log-group-name "$LOG_GROUP" --log-stream-name "$LOG_STREAM" --region "$AWS_REGION" --limit 50 --query 'events[*].message' --output text 2>/dev/null || echo "No logs found yet"
         fi
