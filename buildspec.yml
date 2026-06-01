@@ -110,6 +110,12 @@ phases:
       - docker build -t "$ECR_REPO:latest" .
       - docker tag "$ECR_REPO:latest" "$ECR_URI:latest"
       - docker tag "$ECR_REPO:latest" "$ECR_URI:$COMMIT_SHA"
+      - |
+        echo "[build] Verifying ECR repository exists before push..."
+        if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" >/dev/null 2>&1; then
+          echo "[build] ECR repository $ECR_REPO not found; creating it now"
+          aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION"
+        fi
       - echo "[build] Pushing Docker images to ECR..."
       - docker push "$ECR_URI:latest"
       - docker push "$ECR_URI:$COMMIT_SHA"
@@ -186,7 +192,12 @@ phases:
             --services "$SERVICE_NAME" \
             --region "$AWS_REGION" \
             --query "services[0]" \
-            --output json)
+            --output json 2>/dev/null || echo '{}')
+          if [ -z "$STATUS_JSON" ] || [ "$STATUS_JSON" = "null" ] || [ "$STATUS_JSON" = "{}" ]; then
+            echo "[post_build] ECS service not found or cluster unavailable"
+            FAILED=1
+            break
+          fi
           ROLLOUT_STATE=$(echo "$STATUS_JSON" | python3 -c "import sys, json; d=json.load(sys.stdin); print((d.get('deployments') or [{}])[-1].get('rolloutState','UNKNOWN'))")
           RUNNING_COUNT=$(echo "$STATUS_JSON" | python3 -c "import sys, json; d=json.load(sys.stdin); print((d.get('deployments') or [{}])[-1].get('runningCount',0))")
           DESIRED_COUNT=$(echo "$STATUS_JSON" | python3 -c "import sys, json; d=json.load(sys.stdin); print((d.get('deployments') or [{}])[-1].get('desiredCount',0))")
