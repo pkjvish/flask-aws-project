@@ -8,154 +8,220 @@ env:
     STACK_NAME: flask-secure-stack
     CLUSTER_NAME: DynamicSecureCluster
     SERVICE_NAME: flask-service
+    DATABASE_NAME: crud_db
 
 phases:
+  install:
+    runtime-versions:
+      python: 3.11
+    commands:
+      - echo "[install] runtime ready"
 
   pre_build:
     commands:
-      # ── Authenticate Docker to ECR ────────────────────────────────────
       - echo "[pre_build] Logging in to Amazon ECR..."
       - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
       - export ECR_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO
-      - export COMMIT_SHA=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-7)
+      - export COMMIT_SHA=$(echo ${CODEBUILD_RESOLVED_SOURCE_VERSION:-$(git rev-parse --short HEAD)} | cut -c1-7)
       - echo "[pre_build] ECR URI = $ECR_URI"
       - echo "[pre_build] Commit SHA = $COMMIT_SHA"
-
-      # ── Check CloudFormation stack status and wait if busy ────────────
       - |
-        #!/bin/bash
-        echo "[pre_build] Checking CloudFormation stack status..."
-        while true; do
-          STATUS=$(aws cloudformation describe-stacks \
-            --stack-name $STACK_NAME \
-            --region $AWS_REGION \
-            --query "Stacks[0].StackStatus" \
-            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-          echo "Stack status: $STATUS"
-          case $STATUS in
-            DOES_NOT_EXIST)
-              echo "Stack does not exist. Will create fresh."
-              break
-              ;;
-            *_IN_PROGRESS)
-              echo "Stack busy ($STATUS), waiting 15 seconds..."
-              sleep 15
-              ;;
-            *)
-              echo "Stack is stable: $STATUS"
-              break
-              ;;
-          esac
-        done
-
-        # ── Force stop existing ECS tasks to unblock CloudFormation ──────
-        SVC_STATUS=$(aws ecs describe-services \
-          --cluster $CLUSTER_NAME \
-          --services $SERVICE_NAME \
-          --region $AWS_REGION \
-          --query "services[0].status" \
+        echo "[pre_build] Checking CloudFormation stack and ECS service state..."
+        STACK_STATUS=$(aws cloudformation describe-stacks \
+          --stack-name "$STACK_NAME" \
+          --region "$AWS_REGION" \
+          --query "Stacks[0].StackStatus" \
           --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-        
-        if [ "$SVC_STATUS" = "ACTIVE" ]; then
-          echo "[pre_build] Force stopping running tasks to prevent CloudFormation blocking..."
-          TASK_ARNS=$(aws ecs list-tasks --cluster $CLUSTER_NAME --service-name $SERVICE_NAME --region $AWS_REGION --query 'taskArns' --output text)
-          if [ -n "$TASK_ARNS" ]; then
-            for TASK_ARN in $TASK_ARNS; do
-              aws ecs stop-task --cluster $CLUSTER_NAME --task $TASK_ARN --reason "CodeBuild stopping task to unblock CFN update" --region $AWS_REGION
-            done
-            echo "[pre_build] Tasks stopped. Waiting 10 seconds for state to clear..."
-            sleep 10
+        echo "[pre_build] Stack status: $STACK_STATUS"
+        if [[ "$STACK_STATUS" == "DOES_NOT_EXIST" ]]; then
+          export STACK_EXISTS=false
+        else
+          export STACK_EXISTS=true
+        fi
+
+        if [[ "$STACK_EXISTS" == "true" ]]; then
+          SERVICE_STATUS=$(aws ecs describe-services \
+            --cluster "$CLUSTER_NAME" \
+            --services "$SERVICE_NAME" \
+            --region "$AWS_REGION" \
+            --query "services[0].status" \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          echo "[pre_build] ECS service status: $SERVICE_STATUS"
+          if [[ "$SERVICE_STATUS" == "ACTIVE" ]]; then
+            PREVIOUS_TASK_DEF_ARN=$(aws ecs describe-services \
+              --cluster "$CLUSTER_NAME" \
+              --services "$SERVICE_NAME" \
+              --region "$AWS_REGION" \
+              --query "services[0].taskDefinition" \
+              --output text)
+            echo "[pre_build] Current task definition ARN: $PREVIOUS_TASK_DEF_ARN"
+            export PREVIOUS_TASK_DEF_ARN
+            PREVIOUS_IMAGE=$(aws ecs describe-task-definition \
+              --task-definition "$PREVIOUS_TASK_DEF_ARN" \
+              --region "$AWS_REGION" \
+              --query "taskDefinition.containerDefinitions[0].image" \
+              --output text)
+            echo "[pre_build] Previous image: $PREVIOUS_IMAGE"
+            export PREVIOUS_IMAGE
+            aws ecs update-service \
+              --cluster "$CLUSTER_NAME" \
+              --service "$SERVICE_NAME" \
+              --deployment-configuration minimumHealthyPercent=0,maximumPercent=100 \
+              --region "$AWS_REGION" || true
           fi
         fi
 
-        echo "export ECR_URI=$ECR_URI"           >> /tmp/build_env
-        echo "export COMMIT_SHA=$COMMIT_SHA"     >> /tmp/build_env
-        echo "export STACK_STATUS=$STATUS"       >> /tmp/build_env
-        echo "[pre_build] Done."
+      - echo "export ECR_URI=$ECR_URI" >> /tmp/build_env
+      - echo "export COMMIT_SHA=$COMMIT_SHA" >> /tmp/build_env
+      - echo "export STACK_EXISTS=$STACK_EXISTS" >> /tmp/build_env
+      - echo "export STACK_STATUS=$STACK_STATUS" >> /tmp/build_env
+      - echo "export CLUSTER_NAME=$CLUSTER_NAME" >> /tmp/build_env
+      - echo "export SERVICE_NAME=$SERVICE_NAME" >> /tmp/build_env
+      - echo "export AWS_REGION=$AWS_REGION" >> /tmp/build_env
+      - echo "export AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> /tmp/build_env
+      - echo "export ECR_REPO=$ECR_REPO" >> /tmp/build_env
+      - echo "export DATABASE_NAME=$DATABASE_NAME" >> /tmp/build_env
+      - if [[ -n "${PREVIOUS_TASK_DEF_ARN:-}" ]]; then echo "export PREVIOUS_TASK_DEF_ARN=$PREVIOUS_TASK_DEF_ARN" >> /tmp/build_env; fi
+      - if [[ -n "${PREVIOUS_IMAGE:-}" ]]; then echo "export PREVIOUS_IMAGE=$PREVIOUS_IMAGE" >> /tmp/build_env; fi
 
   build:
     commands:
       - . /tmp/build_env
-
-      # ── ALWAYS deploy CloudFormation to ensure IaC is in sync ─────────
-      - |
-        #!/bin/bash
-        . /tmp/build_env
-        echo "[build] Deploying/Updating infrastructure via CloudFormation..."
-        aws cloudformation deploy \
-          --template-file .aws/cloudformation.yaml \
-          --stack-name $STACK_NAME \
-          --region $AWS_REGION \
-          --capabilities CAPABILITY_IAM \
-          --parameter-overrides DeployService=true AppImage=$ECR_URI:latest SecureDBName=crud_db \
-          --no-fail-on-empty-changeset
-
-        echo "[build] Waiting for stack to stabilize..."
-        aws cloudformation wait stack-create-complete \
-          --stack-name $STACK_NAME --region $AWS_REGION 2>/dev/null || \
-        aws cloudformation wait stack-update-complete \
-          --stack-name $STACK_NAME --region $AWS_REGION
-
-      # ── Build Docker image ────────────────────────────────────────────
       - echo "[build] Building Docker image..."
-      - docker build -t $ECR_REPO:latest .
-
-      # ── Tag and push to ECR ───────────────────────────────────────────
-      - . /tmp/build_env
-      - echo "[build] Pushing image to ECR..."
-      - docker tag $ECR_REPO:latest $ECR_URI:latest
-      - docker tag $ECR_REPO:latest $ECR_URI:$COMMIT_SHA
-      - docker push $ECR_URI:latest
-      - docker push $ECR_URI:$COMMIT_SHA
+      - docker build -t "$ECR_REPO:latest" .
+      - docker tag "$ECR_REPO:latest" "$ECR_URI:latest"
+      - docker tag "$ECR_REPO:latest" "$ECR_URI:$COMMIT_SHA"
+      - echo "[build] Pushing Docker images to ECR..."
+      - docker push "$ECR_URI:latest"
+      - docker push "$ECR_URI:$COMMIT_SHA"
+      - |
+        if [[ "$STACK_EXISTS" != "true" ]]; then
+          echo "[build] First-time deployment: creating CloudFormation stack with ECS service"
+          aws cloudformation deploy \
+            --template-file .aws/cloudformation.yaml \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --capabilities CAPABILITY_IAM \
+            --parameter-overrides DeployService=true AppImage="$ECR_URI:$COMMIT_SHA" SecureDBName="$DATABASE_NAME" \
+            --no-fail-on-empty-changeset
+          aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
+          echo "[build] Initial stack creation completed"
+        else
+          if [[ -z "${PREVIOUS_TASK_DEF_ARN:-}" ]]; then
+            echo "[build] Existing stack without service task definition. Performing a CloudFormation service update."
+            aws cloudformation deploy \
+              --template-file .aws/cloudformation.yaml \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --capabilities CAPABILITY_IAM \
+              --parameter-overrides DeployService=true AppImage="$ECR_URI:$COMMIT_SHA" SecureDBName="$DATABASE_NAME" \
+              --no-fail-on-empty-changeset
+            aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
+          else
+            export NEW_IMAGE="$ECR_URI:$COMMIT_SHA"
+            aws ecs describe-task-definition \
+              --task-definition "$PREVIOUS_TASK_DEF_ARN" \
+              --region "$AWS_REGION" \
+              --query "taskDefinition" \
+              --output json > /tmp/current-task-def.json
+            python3 - <<'PY'
+import json, os
+with open('/tmp/current-task-def.json') as f:
+    data = json.load(f)
+for k in ['taskDefinitionArn', 'revision', 'status', 'registeredAt', 'registeredBy', 'compatibilities', 'requiresAttributes']:
+    data.pop(k, None)
+for container in data.get('containerDefinitions', []):
+    if container.get('name') == 'flask-container':
+        container['image'] = os.environ['NEW_IMAGE']
+with open('/tmp/new-task-def.json', 'w') as f:
+    json.dump(data, f)
+PY
+            NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+              --cli-input-json file:///tmp/new-task-def.json \
+              --region "$AWS_REGION" \
+              --query "taskDefinition.taskDefinitionArn" --output text)
+            echo "NEW_TASK_DEF_ARN=$NEW_TASK_DEF_ARN" >> /tmp/build_env
+            echo "[build] Updating ECS service to use new task definition $NEW_TASK_DEF_ARN"
+            aws ecs update-service \
+              --cluster "$CLUSTER_NAME" \
+              --service "$SERVICE_NAME" \
+              --task-definition "$NEW_TASK_DEF_ARN" \
+              --deployment-configuration minimumHealthyPercent=0,maximumPercent=100 \
+              --force-new-deployment \
+              --region "$AWS_REGION"
+          fi
+        fi
 
   post_build:
     commands:
       - . /tmp/build_env
-
-      # ── Force ECS to pull the new image ───────────────────────────────
+      - echo "[post_build] Waiting for ECS service to stabilize..."
       - |
-        #!/bin/bash
-        . /tmp/build_env
-        echo "[post_build] Forcing new ECS deployment to pull latest image..."
-        aws ecs update-service \
-          --cluster $CLUSTER_NAME \
-          --service $SERVICE_NAME \
-          --force-new-deployment \
-          --region $AWS_REGION
-
-      # ── Wait for ECS tasks to stabilize ──────────────────────────────
-      - echo "[post_build] Waiting for ECS tasks to reach RUNNING state..."
+        TIMEOUT_SECONDS=300
+        INTERVAL_SECONDS=10
+        ELAPSED=0
+        FAILED=0
+        while [ $ELAPSED -lt $TIMEOUT_SECONDS ]; do
+          STATUS_JSON=$(aws ecs describe-services \
+            --cluster "$CLUSTER_NAME" \
+            --services "$SERVICE_NAME" \
+            --region "$AWS_REGION" \
+            --query "services[0]" \
+            --output json)
+          ROLLOUT_STATE=$(echo "$STATUS_JSON" | python3 -c "import sys, json; d=json.load(sys.stdin); print((d.get('deployments') or [{}])[-1].get('rolloutState','UNKNOWN'))")
+          RUNNING_COUNT=$(echo "$STATUS_JSON" | python3 -c "import sys, json; d=json.load(sys.stdin); print((d.get('deployments') or [{}])[-1].get('runningCount',0))")
+          DESIRED_COUNT=$(echo "$STATUS_JSON" | python3 -c "import sys, json; d=json.load(sys.stdin); print((d.get('deployments') or [{}])[-1].get('desiredCount',0))")
+          echo "[post_build] Rollout=$ROLLOUT_STATE Running=$RUNNING_COUNT Desired=$DESIRED_COUNT"
+          if [[ "$ROLLOUT_STATE" == "FAILED" ]]; then
+            FAILED=1
+            break
+          fi
+          if [[ "$ROLLOUT_STATE" == "COMPLETED" ]] && [ "$RUNNING_COUNT" -eq "$DESIRED_COUNT" ]; then
+            FAILED=0
+            break
+          fi
+          sleep $INTERVAL_SECONDS
+          ELAPSED=$((ELAPSED + INTERVAL_SECONDS))
+        done
+        if [ $FAILED -eq 1 ] || [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then
+          echo "[post_build] Deployment failed or timed out. Starting rollback..."
+          if [[ "${STACK_EXISTS:-false}" != "true" ]]; then
+            echo "[post_build] Removing newly-created CloudFormation stack..."
+            aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$AWS_REGION"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
+          fi
+          if [[ -n "${PREVIOUS_TASK_DEF_ARN:-}" ]]; then
+            echo "[post_build] Rolling back ECS service to previous task definition $PREVIOUS_TASK_DEF_ARN"
+            aws ecs update-service \
+              --cluster "$CLUSTER_NAME" \
+              --service "$SERVICE_NAME" \
+              --task-definition "$PREVIOUS_TASK_DEF_ARN" \
+              --deployment-configuration minimumHealthyPercent=0,maximumPercent=100 \
+              --force-new-deployment \
+              --region "$AWS_REGION"
+            aws ecs wait services-stable --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --region "$AWS_REGION"
+          fi
+          if [[ -n "${COMMIT_SHA:-}" ]]; then
+            aws ecr batch-delete-image --repository-name "$ECR_REPO" --image-ids imageTag="$COMMIT_SHA" --region "$AWS_REGION" || true
+          fi
+          exit 1
+        fi
+      - echo "[post_build] ECS deployment stabilized successfully."
       - |
-        aws ecs wait services-stable \
-          --cluster $CLUSTER_NAME \
-          --services $SERVICE_NAME \
-          --region $AWS_REGION
-
-      # ── Print application URL ─────────────────────────────────────────
-      - |
-        URL=$(aws cloudformation describe-stacks \
-          --stack-name $STACK_NAME \
-          --region $AWS_REGION \
+        APP_URL=$(aws cloudformation describe-stacks \
+          --stack-name "$STACK_NAME" \
+          --region "$AWS_REGION" \
           --query "Stacks[0].Outputs[?OutputKey=='ExternalUrl'].OutputValue" \
           --output text)
-        echo "=========================================="
-        echo "Application is live at: $URL"
-        echo "=========================================="
-
-      # ── Fetch ECS container logs ──────────────────────────────────────
-      - echo "[post_build] Fetching ECS container logs..."
+        echo "Application live at: $APP_URL"
       - |
         TASK_ARN=$(aws ecs list-tasks \
-          --cluster $CLUSTER_NAME \
-          --service-name $SERVICE_NAME \
-          --region $AWS_REGION \
+          --cluster "$CLUSTER_NAME" \
+          --service-name "$SERVICE_NAME" \
+          --region "$AWS_REGION" \
           --query 'taskArns[0]' --output text)
-        echo "Task ARN: $TASK_ARN"
-        TASK_ID=$(echo $TASK_ARN | awk -F'/' '{print $NF}')
-        aws logs get-log-events \
-          --log-group-name /ecs/secure-container-app \
-          --log-stream-name secureapp/flask-container/$TASK_ID \
-          --region $AWS_REGION \
-          --limit 50 \
-          --query 'events[*].message' \
-          --output text || echo "No logs found yet"
+        echo "[post_build] Task ARN: $TASK_ARN"
+        if [[ "$TASK_ARN" != "None" && -n "$TASK_ARN" ]]; then
+          TASK_ID=$(echo "$TASK_ARN" | awk -F'/' '{print $NF}')
+          aws logs get-log-events --log-group-name /ecs/secure-container-app --log-stream-name secureapp/flask-container/$TASK_ID --region "$AWS_REGION" --limit 50 --query 'events[*].message' --output text || echo "No logs found yet"
+        fi

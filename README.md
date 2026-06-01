@@ -222,6 +222,31 @@ Add these two secrets:
 
 ---
 
+## Part 4.1 — AWS CodeCommit and CodeBuild Auto Deploy
+
+The CloudFormation template now creates an AWS CodeCommit repository and an AWS CodePipeline pipeline.
+
+Once the stack is deployed, you can push code directly into CodeCommit and CodeBuild will automatically build, push the image, update ECS, and rollback on failure.
+
+1. Clone the CodeCommit repository from the stack outputs:
+
+```bash
+aws codecommit get-repository --repository-name flask-secure-app-repo --query 'repositoryMetadata.cloneUrlHttp' --output text --region ap-south-1
+```
+
+2. Add the CodeCommit remote:
+
+```bash
+git remote add aws <clone-url-from-previous-command>
+git push aws main
+```
+
+3. CodePipeline will automatically trigger a build and deployment on every push to the `main` branch.
+
+4. If a deployment fails, the buildspec rollback logic tries to restore the previous ECS task definition and removes the failed image tag from ECR.
+
+---
+
 ## Part 5 — Automated Deployment via GitHub Actions
 
 Every push to the `main` branch triggers the full deployment pipeline automatically.
