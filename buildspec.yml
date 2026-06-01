@@ -33,13 +33,13 @@ phases:
           --query "Stacks[0].StackStatus" \
           --output text 2>/dev/null || echo "DOES_NOT_EXIST")
         echo "[pre_build] Stack status: $STACK_STATUS"
-        if [[ "$STACK_STATUS" == "DOES_NOT_EXIST" ]]; then
+        if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ]; then
           export STACK_EXISTS=false
         else
           export STACK_EXISTS=true
         fi
 
-        if [[ "$STACK_EXISTS" == "true" ]]; then
+        if [ "$STACK_EXISTS" = "true" ]; then
           SERVICE_STATUS=$(aws ecs describe-services \
             --cluster "$CLUSTER_NAME" \
             --services "$SERVICE_NAME" \
@@ -47,7 +47,7 @@ phases:
             --query "services[0].status" \
             --output text 2>/dev/null || echo "DOES_NOT_EXIST")
           echo "[pre_build] ECS service status: $SERVICE_STATUS"
-          if [[ "$SERVICE_STATUS" == "ACTIVE" ]]; then
+          if [ "$SERVICE_STATUS" = "ACTIVE" ]; then
             PREVIOUS_TASK_DEF_ARN=$(aws ecs describe-services \
               --cluster "$CLUSTER_NAME" \
               --services "$SERVICE_NAME" \
@@ -82,11 +82,11 @@ phases:
       - echo "export ECR_REPO=$ECR_REPO" >> /tmp/build_env
       - echo "export DATABASE_NAME=$DATABASE_NAME" >> /tmp/build_env
       - |
-        if [[ -n "${PREVIOUS_TASK_DEF_ARN:-}" ]]; then
+        if [ -n "${PREVIOUS_TASK_DEF_ARN:-}" ]; then
           echo "export PREVIOUS_TASK_DEF_ARN=$PREVIOUS_TASK_DEF_ARN" >> /tmp/build_env
         fi
       - |
-        if [[ -n "${PREVIOUS_IMAGE:-}" ]]; then
+        if [ -n "${PREVIOUS_IMAGE:-}" ]; then
           echo "export PREVIOUS_IMAGE=$PREVIOUS_IMAGE" >> /tmp/build_env
         fi
 
@@ -101,7 +101,7 @@ phases:
       - docker push "$ECR_URI:latest"
       - docker push "$ECR_URI:$COMMIT_SHA"
       - |
-        if [[ "$STACK_EXISTS" != "true" ]]; then
+        if [ "$STACK_EXISTS" != "true" ]; then
           echo "[build] First-time deployment: creating CloudFormation stack with ECS service"
           aws cloudformation deploy \
             --template-file .aws/cloudformation.yaml \
@@ -113,7 +113,7 @@ phases:
           aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
           echo "[build] Initial stack creation completed"
         else
-          if [[ -z "${PREVIOUS_TASK_DEF_ARN:-}" ]]; then
+          if [ -z "${PREVIOUS_TASK_DEF_ARN:-}" ]; then
             echo "[build] Existing stack without service task definition. Performing a CloudFormation service update."
             aws cloudformation deploy \
               --template-file .aws/cloudformation.yaml \
@@ -178,11 +178,11 @@ phases:
           RUNNING_COUNT=$(echo "$STATUS_JSON" | python3 -c "import sys, json; d=json.load(sys.stdin); print((d.get('deployments') or [{}])[-1].get('runningCount',0))")
           DESIRED_COUNT=$(echo "$STATUS_JSON" | python3 -c "import sys, json; d=json.load(sys.stdin); print((d.get('deployments') or [{}])[-1].get('desiredCount',0))")
           echo "[post_build] Rollout=$ROLLOUT_STATE Running=$RUNNING_COUNT Desired=$DESIRED_COUNT"
-          if [[ "$ROLLOUT_STATE" == "FAILED" ]]; then
+          if [ "$ROLLOUT_STATE" = "FAILED" ]; then
             FAILED=1
             break
           fi
-          if [[ "$ROLLOUT_STATE" == "COMPLETED" ]] && [ "$RUNNING_COUNT" -eq "$DESIRED_COUNT" ]; then
+          if [ "$ROLLOUT_STATE" = "COMPLETED" ] && [ "$RUNNING_COUNT" -eq "$DESIRED_COUNT" ]; then
             FAILED=0
             break
           fi
@@ -191,12 +191,12 @@ phases:
         done
         if [ $FAILED -eq 1 ] || [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then
           echo "[post_build] Deployment failed or timed out. Starting rollback..."
-          if [[ "${STACK_EXISTS:-false}" != "true" ]]; then
+          if [ "${STACK_EXISTS:-false}" != "true" ]; then
             echo "[post_build] Removing newly-created CloudFormation stack..."
             aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$AWS_REGION"
             aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
           fi
-          if [[ -n "${PREVIOUS_TASK_DEF_ARN:-}" ]]; then
+          if [ -n "${PREVIOUS_TASK_DEF_ARN:-}" ]; then
             echo "[post_build] Rolling back ECS service to previous task definition $PREVIOUS_TASK_DEF_ARN"
             aws ecs update-service \
               --cluster "$CLUSTER_NAME" \
@@ -207,7 +207,7 @@ phases:
               --region "$AWS_REGION"
             aws ecs wait services-stable --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --region "$AWS_REGION"
           fi
-          if [[ -n "${COMMIT_SHA:-}" ]]; then
+          if [ -n "${COMMIT_SHA:-}" ]; then
             aws ecr batch-delete-image --repository-name "$ECR_REPO" --image-ids imageTag="$COMMIT_SHA" --region "$AWS_REGION" || true
           fi
           exit 1
@@ -227,7 +227,7 @@ phases:
           --region "$AWS_REGION" \
           --query 'taskArns[0]' --output text)
         echo "[post_build] Task ARN: $TASK_ARN"
-        if [[ "$TASK_ARN" != "None" && -n "$TASK_ARN" ]]; then
+        if [ "$TASK_ARN" != "None" ] && [ -n "$TASK_ARN" ]; then
           TASK_ID=$(echo "$TASK_ARN" | awk -F'/' '{print $NF}')
           aws logs get-log-events --log-group-name /ecs/secure-container-app --log-stream-name secureapp/flask-container/$TASK_ID --region "$AWS_REGION" --limit 50 --query 'events[*].message' --output text || echo "No logs found yet"
         fi

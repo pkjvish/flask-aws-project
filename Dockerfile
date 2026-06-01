@@ -18,7 +18,9 @@ WORKDIR /app
 
 # Setup application environment tracking dependencies
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+    && python3 -m pip install --no-cache-dir mysqlclient==2.2.8 \
+    && pip3 install --no-cache-dir -r requirements.txt
 
 COPY . .
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
