@@ -93,6 +93,19 @@ phases:
   build:
     commands:
       - . /tmp/build_env
+      - |
+        if [ "$STACK_EXISTS" != "true" ]; then
+          echo "[build] First-time deployment: creating base CloudFormation stack (service disabled)"
+          aws cloudformation deploy \
+            --template-file .aws/cloudformation.yaml \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --capabilities CAPABILITY_IAM \
+            --parameter-overrides DeployService=false AppImage="public.ecr.aws/docker/library/python:3.11-slim" SecureDBName="$DATABASE_NAME" \
+            --no-fail-on-empty-changeset
+          aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
+          echo "[build] Base stack created"
+        fi
       - echo "[build] Building Docker image..."
       - docker build -t "$ECR_REPO:latest" .
       - docker tag "$ECR_REPO:latest" "$ECR_URI:latest"
@@ -102,7 +115,7 @@ phases:
       - docker push "$ECR_URI:$COMMIT_SHA"
       - |
         if [ "$STACK_EXISTS" != "true" ]; then
-          echo "[build] First-time deployment: creating CloudFormation stack with ECS service"
+          echo "[build] Enabling ECS service by updating CloudFormation stack"
           aws cloudformation deploy \
             --template-file .aws/cloudformation.yaml \
             --stack-name "$STACK_NAME" \
@@ -110,8 +123,8 @@ phases:
             --capabilities CAPABILITY_IAM \
             --parameter-overrides DeployService=true AppImage="$ECR_URI:$COMMIT_SHA" SecureDBName="$DATABASE_NAME" \
             --no-fail-on-empty-changeset
-          aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
-          echo "[build] Initial stack creation completed"
+          aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
+          echo "[build] Initial service deployment completed"
         else
           if [ -z "${PREVIOUS_TASK_DEF_ARN:-}" ]; then
             echo "[build] Existing stack without service task definition. Performing a CloudFormation service update."
