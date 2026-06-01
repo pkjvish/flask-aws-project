@@ -81,8 +81,14 @@ phases:
       - echo "export AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> /tmp/build_env
       - echo "export ECR_REPO=$ECR_REPO" >> /tmp/build_env
       - echo "export DATABASE_NAME=$DATABASE_NAME" >> /tmp/build_env
-      - if [[ -n "${PREVIOUS_TASK_DEF_ARN:-}" ]]; then echo "export PREVIOUS_TASK_DEF_ARN=$PREVIOUS_TASK_DEF_ARN" >> /tmp/build_env; fi
-      - if [[ -n "${PREVIOUS_IMAGE:-}" ]]; then echo "export PREVIOUS_IMAGE=$PREVIOUS_IMAGE" >> /tmp/build_env; fi
+      - |
+        if [[ -n "${PREVIOUS_TASK_DEF_ARN:-}" ]]; then
+          echo "export PREVIOUS_TASK_DEF_ARN=$PREVIOUS_TASK_DEF_ARN" >> /tmp/build_env
+        fi
+      - |
+        if [[ -n "${PREVIOUS_IMAGE:-}" ]]; then
+          echo "export PREVIOUS_IMAGE=$PREVIOUS_IMAGE" >> /tmp/build_env
+        fi
 
   build:
     commands:
@@ -125,17 +131,17 @@ phases:
               --query "taskDefinition" \
               --output json > /tmp/current-task-def.json
             python3 - <<'PY'
-import json, os
-with open('/tmp/current-task-def.json') as f:
-    data = json.load(f)
-for k in ['taskDefinitionArn', 'revision', 'status', 'registeredAt', 'registeredBy', 'compatibilities', 'requiresAttributes']:
-    data.pop(k, None)
-for container in data.get('containerDefinitions', []):
-    if container.get('name') == 'flask-container':
-        container['image'] = os.environ['NEW_IMAGE']
-with open('/tmp/new-task-def.json', 'w') as f:
-    json.dump(data, f)
-PY
+              import json, os
+              with open('/tmp/current-task-def.json') as f:
+                  data = json.load(f)
+              for k in ['taskDefinitionArn', 'revision', 'status', 'registeredAt', 'registeredBy', 'compatibilities', 'requiresAttributes']:
+                  data.pop(k, None)
+              for container in data.get('containerDefinitions', []):
+                  if container.get('name') == 'flask-container':
+                      container['image'] = os.environ['NEW_IMAGE']
+              with open('/tmp/new-task-def.json', 'w') as f:
+                  json.dump(data, f)
+            PY
             NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
               --cli-input-json file:///tmp/new-task-def.json \
               --region "$AWS_REGION" \
