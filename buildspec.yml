@@ -4,10 +4,10 @@ env:
   variables:
     AWS_REGION: ap-south-1
     AWS_ACCOUNT_ID: '135306227278'
-    ECR_REPO: dynamic-secure-app
+    ECR_REPO: flask-secure-stack-ecr-repo
     STACK_NAME: flask-secure-stack
-    CLUSTER_NAME: DynamicSecureCluster
-    SERVICE_NAME: flask-service
+    CLUSTER_NAME: flask-secure-stack-cluster
+    SERVICE_NAME: flask-secure-stack-service
     DATABASE_NAME: crud_db
 
 phases:
